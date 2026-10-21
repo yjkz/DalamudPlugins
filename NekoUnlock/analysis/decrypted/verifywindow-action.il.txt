@@ -1,0 +1,94 @@
+; NekoVerifierLib.VerifyWindow::<callback-method>(System.Action)
+; Recovered at runtime after the protector decrypted the method body.
+; ILSpy reports 72 instructions. The relevant tail is:
+;
+;   0072: ldarg.1
+;   0073: callvirt System.Void System.Action::Invoke()
+;   0078..0083: state-machine bookkeeping
+;   0085: ldarg.0
+;   0086: callvirt System.Void Dalamud.Interface.Windowing.Window::Draw()
+;   008B..0096: state-machine bookkeeping
+;   0098: ret
+;
+; High-level behavior:
+;   void Show(Action callback)
+;   {
+;       callback();
+;       Draw();
+;   }
+;
+; Replacing this method with callback() alone skips Draw() and the
+; server-bound verification UI.
+
+0000: ldc.i4.5
+0001: newarr System.Int32
+0006: dup
+0007: ldc.i4.0
+0008: ldc.i4.6
+0009: stelem.i4
+000A: dup
+000B: ldc.i4.1
+000C: ldc.i4 -90377624
+0011: stelem.i4
+0012: dup
+0013: ldc.i4.2
+0014: ldc.i4 -1036064142
+0019: stelem.i4
+001A: dup
+001B: ldc.i4.3
+001C: ldc.i4 2135262079
+0021: stelem.i4
+0022: dup
+0023: ldc.i4.4
+0024: ldc.i4 -155291962
+0029: stelem.i4
+002A: stloc.1
+002B: nop
+002C: ldc.i4 1382678506
+0031: dup
+0032: stloc.0
+0033: ldloc.1
+0034: ldc.i4.0
+0035: ldelem.i4
+0036: rem.un
+0037: switch
+0054: br.s IL_0098
+0056: nop
+0057: ldloc.0
+0058: ldc.i4 1188053357
+005D: mul
+005E: ldloc.1
+005F: ldc.i4.4
+0060: ldelem.i4
+0061: xor
+0062: br.s IL_0031
+0064: nop
+0065: ldloc.0
+0066: ldc.i4 555262538
+006B: mul
+006C: ldloc.1
+006D: ldc.i4.2
+006E: ldelem.i4
+006F: xor
+0070: br.s IL_0031
+0072: ldarg.1
+0073: callvirt System.Void System.Action::Invoke()
+0078: ldloc.0
+0079: ldc.i4 150625771
+007E: mul
+007F: ldloc.1
+0080: ldc.i4.3
+0081: ldelem.i4
+0082: xor
+0083: br.s IL_0031
+0085: ldarg.0
+0086: callvirt System.Void Dalamud.Interface.Windowing.Window::Draw()
+008B: ldloc.0
+008C: ldc.i4 575157276
+0091: mul
+0092: ldloc.1
+0093: ldc.i4.1
+0094: ldelem.i4
+0095: xor
+0096: br.s IL_0031
+0098: ret

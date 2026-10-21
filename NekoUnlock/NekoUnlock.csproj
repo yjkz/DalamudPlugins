@@ -1,0 +1,20 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <AssemblyName>NekoUnlock</AssemblyName>
+    <RootNamespace>NekoUnlock</RootNamespace>
+    <Version>1.0.0.0</Version>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="analysis/**/*.cs" />
+    <Compile Remove="dist/**/*.cs" />
+    <None Remove="analysis/**/*" />
+    <None Remove="dist/**/*" />
+  </ItemGroup>
+</Project>
