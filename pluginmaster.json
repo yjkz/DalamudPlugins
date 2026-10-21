@@ -37,13 +37,13 @@
     "DownloadCount": 490111
   },
   {
-    "Author": "Errer",
+    "Author": "yjkz",
     "Name": "NekoUnlock",
     "Punchline": "PvPAuto / CharaCradThief 本地解锁",
     "Description": "配套解锁插件。安装 PvPAuto (Unlocked) 或 CharaCradThief (Unlocked) 后必须同时启用 NekoUnlock。",
-    "Changelog": "1.0.0.0",
+    "Changelog": "1.0.0.1：改为写入验证管理器静态状态并移除验证窗口绘制回调；作者改为 yjkz。",
     "InternalName": "NekoUnlock",
-    "AssemblyVersion": "1.0.0.0",
+    "AssemblyVersion": "1.0.0.1",
     "RepoUrl": "https://github.com/yjkz/DalamudPlugins",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 15,
