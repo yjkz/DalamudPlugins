@@ -98,6 +98,8 @@ void Show(Action callback)
 - CharaCradThief：
   - 每秒写入验证管理器的 4 个静态 `DateTime` 字段（未来 10 年）；
   - 把状态字符串中的 `未激活` / `未连接` / `未授权` / `未验证` 改为激活态；
+  - 将授权状态的 getter/setter 替换为映射逻辑，保证插件内部写入 `未激活`
+    后，界面和功能读取到的仍是 `已激活`；
   - 从 `UiBuilder.Draw` 移除验证窗口的无参绘制回调，并设置 `IsOpen = false`；
   - 不再替换接收 `Action` 的辅助方法，也不再轮询它的静态回调。
 

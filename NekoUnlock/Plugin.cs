@@ -352,8 +352,11 @@ internal sealed class CctUnlock : IDisposable
     private readonly MethodInfo _drawCallbackMethod;
     private readonly FieldInfo[] _dateFields;
     private readonly FieldInfo[] _stringFields;
+    private readonly PropertyInfo? _statusProperty;
+    private readonly FieldInfo? _statusField;
     private DateTime _nextApply = DateTime.MinValue;
     private bool _logged;
+    private bool _statusPatched;
 
     private CctUnlock(
         IPluginLog log,
@@ -361,7 +364,9 @@ internal sealed class CctUnlock : IDisposable
         FieldInfo? windowField,
         MethodInfo drawCallbackMethod,
         FieldInfo[] dateFields,
-        FieldInfo[] stringFields)
+        FieldInfo[] stringFields,
+        PropertyInfo? statusProperty,
+        FieldInfo? statusField)
     {
         _log = log;
         _pluginInterface = pluginInterface;
@@ -369,6 +374,8 @@ internal sealed class CctUnlock : IDisposable
         _drawCallbackMethod = drawCallbackMethod;
         _dateFields = dateFields;
         _stringFields = stringFields;
+        _statusProperty = statusProperty;
+        _statusField = statusField;
     }
 
     public static CctUnlock? TryCreate(Assembly? assembly, IPluginLog log, IDalamudPluginInterface pluginInterface)
@@ -413,7 +420,67 @@ internal sealed class CctUnlock : IDisposable
             .Where(field => field.FieldType == typeof(string))
             .ToArray();
 
-        return new CctUnlock(log, pluginInterface, windowField, drawCallbackMethod, dateFields, stringFields);
+        // First string property is the authorization status shown by Draw.
+        var statusProperty = verifierType
+            .GetProperties(StaticFlags)
+            .Where(property => property.PropertyType == typeof(string) &&
+                               property.GetMethod is not null &&
+                               property.SetMethod is not null)
+            .OrderBy(property => property.MetadataToken)
+            .FirstOrDefault();
+
+        var statusField = statusProperty?.SetMethod is not null
+            ? FindStaticStringField(statusProperty.SetMethod, verifierType) ??
+              (statusProperty.GetMethod is not null ? FindStaticStringField(statusProperty.GetMethod, verifierType) : null)
+            : null;
+
+        return new CctUnlock(
+            log,
+            pluginInterface,
+            windowField,
+            drawCallbackMethod,
+            dateFields,
+            stringFields,
+            statusProperty,
+            statusField);
+    }
+
+    private static FieldInfo? FindStaticStringField(MethodInfo method, Type declaringType)
+    {
+        try
+        {
+            RuntimeHelpers.PrepareMethod(method.MethodHandle);
+            var il = method.GetMethodBody()?.GetILAsByteArray();
+            if (il is null)
+                return null;
+
+            for (var index = 0; index + 4 < il.Length; index++)
+            {
+                // ldsfld 0x7E, stsfld 0x80
+                if (il[index] != 0x7E && il[index] != 0x80)
+                    continue;
+
+                var token = BitConverter.ToInt32(il, index + 1);
+                try
+                {
+                    var field = method.Module.ResolveField(token);
+                    if (field is not null &&
+                        field.DeclaringType == declaringType &&
+                        field.FieldType == typeof(string))
+                        return field;
+                }
+                catch
+                {
+                    // Token can refer to a field in another module.
+                }
+            }
+        }
+        catch
+        {
+            // Encrypted body or unsupported metadata.
+        }
+
+        return null;
     }
 
     public void Apply()
@@ -428,6 +495,25 @@ internal sealed class CctUnlock : IDisposable
         {
             try { field.SetValue(null, expires); }
             catch { /* readonly or type mismatch on a future build */ }
+        }
+
+        if (!_statusPatched &&
+            _statusProperty?.GetMethod is not null &&
+            _statusProperty.SetMethod is not null &&
+            _statusField is not null)
+        {
+            CctPatches.StatusField = _statusField;
+            var getterPatched = NativeDetour.Patch(
+                _statusProperty.GetMethod,
+                typeof(CctPatches).GetMethod(nameof(CctPatches.GetStatus))!);
+            var setterPatched = NativeDetour.Patch(
+                _statusProperty.SetMethod,
+                typeof(CctPatches).GetMethod(nameof(CctPatches.SetStatus))!);
+            if (getterPatched && setterPatched)
+            {
+                _statusPatched = true;
+                _log.Information("[NekoUnlock] CharaCradThief authorization status getter/setter patched");
+            }
         }
 
         foreach (var field in _stringFields)
@@ -484,8 +570,32 @@ internal sealed class CctUnlock : IDisposable
 
 internal static class CctPatches
 {
+    public static FieldInfo? StatusField;
+
     public static void NoOpInstance(object self)
     {
+    }
+
+    public static string GetStatus()
+    {
+        return MapStatus(StatusField?.GetValue(null) as string);
+    }
+
+    public static void SetStatus(string value)
+    {
+        StatusField?.SetValue(null, MapStatus(value));
+    }
+
+    private static string MapStatus(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return value ?? string.Empty;
+
+        return value
+            .Replace("未激活", "已激活", StringComparison.Ordinal)
+            .Replace("未连接", "已连接", StringComparison.Ordinal)
+            .Replace("未授权", "已授权", StringComparison.Ordinal)
+            .Replace("未验证", "已验证", StringComparison.Ordinal);
     }
 }
 

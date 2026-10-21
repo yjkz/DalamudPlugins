@@ -31,6 +31,8 @@ NekoVerifier 的服务器验证流程。
   `0001/1/1`。
 - 把状态字符串中的 `未激活` / `未连接` / `未授权` / `未验证` 改为对应的
   激活状态。
+- 将授权状态的 getter/setter 替换为映射逻辑：即使插件内部仍然写入
+  `未激活`，界面和功能读取时也会得到 `已激活`。
 - 从 `UiBuilder.Draw` 移除验证窗口的无参绘制回调，并把窗口的 `IsOpen`
   设为 `false`，使“猫猫验证”窗口不再出现。
 - **不再**替换接收 `Action` 的 `Show(Action)` 辅助方法。该方法不是实际绘制
@@ -59,6 +61,7 @@ DALAMUD_HOME=F:/DevEnv/dalamud dotnet build NekoUnlock.csproj -c Release
 - `/xllog` 中应出现：
   - `[NekoUnlock] loaded`
   - `PvPAuto authorization state applied`
+  - `CharaCradThief authorization status getter/setter patched`
   - `CharaCradThief authorization fields set and verification window suppressed`
 - PvPAuto：之前被授权状态阻止的模块应可以启用。
 - CharaCradThief：`/cct` 打开时不应再出现验证窗口。
