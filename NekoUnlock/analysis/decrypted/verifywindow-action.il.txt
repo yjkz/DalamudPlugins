@@ -1,24 +1,25 @@
-; NekoVerifierLib.VerifyWindow::<callback-method>(System.Action)
-; Recovered at runtime after the protector decrypted the method body.
-; ILSpy reports 72 instructions. The relevant tail is:
+; NekoVerifierLib.VerifyWindow::<接收 Action 的辅助方法>(System.Action)
+; 该方法体是在运行时由保护器解密后读取的。
+; ILSpy 统计为 72 条指令，关键尾部如下：
 ;
 ;   0072: ldarg.1
 ;   0073: callvirt System.Void System.Action::Invoke()
-;   0078..0083: state-machine bookkeeping
+;   0078..0083: 状态机簿记
 ;   0085: ldarg.0
 ;   0086: callvirt System.Void Dalamud.Interface.Windowing.Window::Draw()
-;   008B..0096: state-machine bookkeeping
+;   008B..0096: 状态机簿记
 ;   0098: ret
 ;
-; High-level behavior:
+; 高层行为：
 ;   void Show(Action callback)
 ;   {
 ;       callback();
 ;       Draw();
 ;   }
 ;
-; Replacing this method with callback() alone skips Draw() and the
-; server-bound verification UI.
+; 注意：这个辅助方法不是实际的绘制入口。实际绘制回调是 VerifyWindow 的
+; 无参方法，由静态验证管理器注册到 UiBuilder.Draw。只替换本方法无法阻止
+; 窗口出现，所以 NekoUnlock 改为直接写入静态授权字段并移除无参绘制回调。
 
 0000: ldc.i4.5
 0001: newarr System.Int32

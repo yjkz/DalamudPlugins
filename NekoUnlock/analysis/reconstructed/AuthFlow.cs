@@ -1,19 +1,19 @@
-// Behavioral reconstruction, not original source.
-// The shipped assemblies encrypt method bodies at rest; these snippets summarize
-// the control flow recovered from metadata, ILSpy output and runtime-decrypted IL.
+// 行为级重建，不是原始源码。
+// 发布程序集的方法体在磁盘上是加密的；以下代码是根据元数据、ILSpy 输出
+// 和运行时解密后的 IL 还原出的控制流摘要。
 
 namespace FFXIVPVPAuto.Verification.Reconstructed;
 
 internal static class AuthorizationGate
 {
-    // Observed call target from ModuleManager.ValidateEnable.
+    // 来自 ModuleManager.ValidateEnable 中观察到的调用目标。
     public static bool Allows(bool requiresAuth, bool requiresTestCode)
         => AuthState.IsAccessAllowed(requiresAuth, requiresTestCode);
 }
 
 internal static class AuthState
 {
-    // Simplified equivalent of the observed checks.
+    // 对观察到的检查逻辑的简化等价写法。
     public static bool IsAccessAllowed(bool requiresAuth, bool requiresTestCode)
         => (!requiresAuth || IsEffectivelyAuthorized)
            && (!requiresTestCode || IsTestFeatureAuthorized);
@@ -24,10 +24,9 @@ internal static class AuthState
 
 internal sealed class VerifyManager
 {
-    // AuthVerifyClient posts RSA/HOTP-wrapped requests to:
+    // AuthVerifyClient 向以下地址发送 RSA/HOTP 包装后的请求：
     //   https://auth.n3ko.fun/api/v1/query
-    // A live check validates the hello response; a credential check validates
-    // the machine/account/character credentials.
+    // 存活检查校验 hello 响应；凭据检查校验机器码/账号/角色凭据。
     public async Task RefreshAsync()
     {
         var live = await _authClient.CheckLiveResultAsync();
@@ -50,13 +49,13 @@ internal sealed class VerifyManager
     }
 }
 
-// CharaCradThief: NekoVerifierLib.VerifyWindow
+// CharaCradThief：NekoVerifierLib.VerifyWindow
 internal sealed class VerifyWindowReconstructed
 {
-    // Runtime-decrypted IL shows:
+    // 运行时解密后的 IL 显示：
     //   ldarg.1; callvirt Action::Invoke
     //   ldarg.0; callvirt Window::Draw
-    // i.e. the callback is invoked before the window is drawn.
+    // 即先执行回调，再绘制窗口。
     public void Show(Action callback)
     {
         callback();
@@ -65,6 +64,6 @@ internal sealed class VerifyWindowReconstructed
 
     private void Draw()
     {
-        // ImGui window with the verification code / Discord link.
+        // 绘制验证码 / Discord 链接等验证界面。
     }
 }

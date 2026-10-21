@@ -3,16 +3,16 @@
   "Name": "NekoUnlock",
   "InternalName": "NekoUnlock",
   "AssemblyVersion": "1.0.0.0",
-  "Description": "Author-only companion plugin. Injects local authorization state into PvPAuto (pvpauto 7.1.1.2 / FFXIVPVPAuto 1.0.0.16) and bypasses the NekoVerifier window in CharaCradThief 4.0.1.10.",
+  "Description": "作者自用的配套解锁插件。向 PvPAuto（pvpauto 7.1.1.2 / FFXIVPVPAuto 1.0.0.16）注入本地授权状态，并绕过 CharaCradThief 4.0.1.10 的 NekoVerifier 验证窗口。需要安装对应版本的原插件。",
   "ApplicableVersion": "any",
   "Tags": [
-    "utility"
+    "工具"
   ],
   "DalamudApiLevel": 15,
   "LoadRequiredState": 0,
   "LoadSync": false,
   "CanUnloadAsync": false,
   "LoadPriority": 0,
-  "Punchline": "Local authorization unlock for PvPAuto and CharaCradThief",
+  "Punchline": "PvPAuto / CharaCradThief 本地解锁",
   "AcceptsFeedback": false
 }

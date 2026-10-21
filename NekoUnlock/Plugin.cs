@@ -11,16 +11,18 @@ public sealed class Plugin : IDalamudPlugin
 {
     private readonly IFramework _framework;
     private readonly IPluginLog _log;
+    private readonly IDalamudPluginInterface _pluginInterface;
     private readonly object _gate = new();
     private DateTime _nextPvP = DateTime.MinValue;
     private DateTime _nextCct = DateTime.MinValue;
     private readonly List<PvPAutoState> _pvP = new();
     private CctUnlock? _cct;
 
-    public Plugin(IFramework framework, IPluginLog log)
+    public Plugin(IFramework framework, IPluginLog log, IDalamudPluginInterface pluginInterface)
     {
         _framework = framework;
         _log = log;
+        _pluginInterface = pluginInterface;
         _framework.Update += OnUpdate;
         AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoad;
         _log.Information("[NekoUnlock] loaded");
@@ -102,7 +104,7 @@ public sealed class Plugin : IDalamudPlugin
         lock (_gate)
         {
             if (_cct is null && assembly is not null)
-                _cct = CctUnlock.TryCreate(assembly, _log);
+                _cct = CctUnlock.TryCreate(assembly, _log, _pluginInterface);
             _cct?.Apply();
         }
     }
@@ -330,27 +332,46 @@ internal sealed class PvPAutoState
 }
 
 /// <summary>
-/// CharaCradThief's <c>VerifyWindow</c> has an entry method that takes the
-/// success callback, invokes it, and then draws the window. Replacing that
-/// method with a callback invocation skips the drawing and the server round-trip.
+/// CharaCradThief's verifier keeps its authorization snapshot in a static class:
+/// five strings (connection/authorization status plus three credentials) and four
+/// DateTimes. The VerifyWindow draw callback is registered on UiBuilder.Draw.
+///
+/// Instead of patching the one-argument Show(Action) helper (which is not the
+/// draw path), we set the same fields the verifier writes and remove the draw
+/// callback from UiBuilder.Draw. This hides the window and makes the verifier's
+/// own date/status checks see an active authorization.
 /// </summary>
 internal sealed class CctUnlock : IDisposable
 {
-    private readonly IPluginLog _log;
-    private readonly MethodInfo _actionMethod;
-    private readonly FieldInfo? _callbackField;
-    private bool _patched;
-    private bool _logged;
-    private Action? _lastCallback;
+    private const BindingFlags StaticFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+    private const BindingFlags InstanceFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
 
-    private CctUnlock(IPluginLog log, MethodInfo actionMethod, FieldInfo? callbackField)
+    private readonly IPluginLog _log;
+    private readonly IDalamudPluginInterface _pluginInterface;
+    private readonly FieldInfo? _windowField;
+    private readonly MethodInfo _drawCallbackMethod;
+    private readonly FieldInfo[] _dateFields;
+    private readonly FieldInfo[] _stringFields;
+    private DateTime _nextApply = DateTime.MinValue;
+    private bool _logged;
+
+    private CctUnlock(
+        IPluginLog log,
+        IDalamudPluginInterface pluginInterface,
+        FieldInfo? windowField,
+        MethodInfo drawCallbackMethod,
+        FieldInfo[] dateFields,
+        FieldInfo[] stringFields)
     {
         _log = log;
-        _actionMethod = actionMethod;
-        _callbackField = callbackField;
+        _pluginInterface = pluginInterface;
+        _windowField = windowField;
+        _drawCallbackMethod = drawCallbackMethod;
+        _dateFields = dateFields;
+        _stringFields = stringFields;
     }
 
-    public static CctUnlock? TryCreate(Assembly? assembly, IPluginLog log)
+    public static CctUnlock? TryCreate(Assembly? assembly, IPluginLog log, IDalamudPluginInterface pluginInterface)
     {
         if (assembly is null)
             return null;
@@ -359,56 +380,100 @@ internal sealed class CctUnlock : IDisposable
         if (windowType is null)
             return null;
 
-        var actionMethod = windowType
-            .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-            .FirstOrDefault(method =>
-            {
-                var parameters = method.GetParameters();
-                return parameters.Length == 1 && parameters[0].ParameterType == typeof(Action);
-            });
-
-        if (actionMethod is null)
+        // The verifier manager is the static class holding >=3 DateTime fields
+        // and the VerifyWindow instance.
+        var verifierType = assembly.GetTypes().FirstOrDefault(type =>
+        {
+            var fields = type.GetFields(StaticFlags);
+            return fields.Count(field => field.FieldType == typeof(DateTime)) >= 3 &&
+                   fields.Any(field => field.FieldType == windowType);
+        });
+        if (verifierType is null)
             return null;
 
-        FieldInfo? callbackField = null;
-        foreach (var nested in windowType.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic))
-        {
-            callbackField = nested
-                .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
-                .FirstOrDefault(field => field.FieldType == typeof(Action));
-            if (callbackField is not null)
-                break;
-        }
+        var windowField = verifierType
+            .GetFields(StaticFlags)
+            .FirstOrDefault(field => field.FieldType == windowType);
+        var drawCallbackMethod = windowType
+            .GetMethods(InstanceFlags)
+            .FirstOrDefault(method =>
+                method.GetParameters().Length == 0 &&
+                method.Name != "Draw" &&
+                method.Name != ".ctor" &&
+                method.Name != ".cctor");
+        if (drawCallbackMethod is null)
+            return null;
 
-        return new CctUnlock(log, actionMethod, callbackField);
+        var dateFields = verifierType
+            .GetFields(StaticFlags)
+            .Where(field => field.FieldType == typeof(DateTime))
+            .ToArray();
+        var stringFields = verifierType
+            .GetFields(StaticFlags)
+            .Where(field => field.FieldType == typeof(string))
+            .ToArray();
+
+        return new CctUnlock(log, pluginInterface, windowField, drawCallbackMethod, dateFields, stringFields);
     }
 
     public void Apply()
     {
-        if (!_patched)
+        var now = DateTime.UtcNow;
+        if (now < _nextApply)
+            return;
+        _nextApply = now.AddSeconds(1);
+
+        var expires = DateTime.Now.AddYears(10);
+        foreach (var field in _dateFields)
         {
-            _patched = NativeDetour.Patch(_actionMethod, typeof(CctPatches).GetMethod(nameof(CctPatches.InvokeAction))!);
-            if (_patched)
-                _log.Information("[NekoUnlock] CharaCradThief verification callback patched");
-            else if (!_logged)
+            try { field.SetValue(null, expires); }
+            catch { /* readonly or type mismatch on a future build */ }
+        }
+
+        foreach (var field in _stringFields)
+        {
+            try
             {
-                _logged = true;
-                _log.Warning("[NekoUnlock] CharaCradThief verification patch failed; falling back to callback polling");
+                if (field.GetValue(null) is not string value)
+                    continue;
+
+                if (value.Contains("未激活", StringComparison.Ordinal))
+                    field.SetValue(null, "已激活");
+                else if (value.Contains("未连接", StringComparison.Ordinal))
+                    field.SetValue(null, "已连接");
+                else if (value.Contains("未授权", StringComparison.Ordinal))
+                    field.SetValue(null, "已授权");
+                else if (value.Contains("未验证", StringComparison.Ordinal))
+                    field.SetValue(null, "已验证");
+            }
+            catch
+            {
+                // Keep credential fields untouched.
             }
         }
 
-        if (_callbackField?.GetValue(null) is Action callback && !ReferenceEquals(callback, _lastCallback))
+        var window = _windowField?.GetValue(null);
+        if (window is not null)
         {
-            _lastCallback = callback;
             try
             {
-                callback();
-                _log.Information("[NekoUnlock] CharaCradThief verification callback invoked");
+                var draw = Delegate.CreateDelegate(typeof(Action), window, _drawCallbackMethod);
+                _pluginInterface.UiBuilder.Draw -= (Action)draw;
+                window.GetType()
+                    .GetProperty("IsOpen", InstanceFlags)
+                    ?.SetValue(window, false);
             }
             catch (Exception ex)
             {
-                _log.Warning($"[NekoUnlock] CharaCradThief callback failed: {ex.GetType().Name}: {ex.Message}");
+                if (!_logged)
+                    _log.Warning($"[NekoUnlock] CharaCradThief draw callback removal failed: {ex.GetType().Name}: {ex.Message}");
             }
+        }
+
+        if (!_logged)
+        {
+            _logged = true;
+            _log.Information("[NekoUnlock] CharaCradThief authorization fields set and verification window suppressed");
         }
     }
 
@@ -419,11 +484,6 @@ internal sealed class CctUnlock : IDisposable
 
 internal static class CctPatches
 {
-    public static void InvokeAction(object self, Action action)
-    {
-        action();
-    }
-
     public static void NoOpInstance(object self)
     {
     }
