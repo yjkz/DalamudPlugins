@@ -26,15 +26,21 @@ NekoVerifier 的服务器验证流程。
 
 ### CharaCradThief
 
-- 找到静态验证管理器（包含验证窗口、3 个凭证字符串和 4 个 `DateTime` 字段）。
+- 找到静态验证管理器（包含验证窗口、5 个状态/凭证字符串和 4 个 `DateTime` 字段）。
+- 找到插件入口使用的“认证客户端”（静态字段），以及它用来决定“打开主窗口还是验证窗口”的
+  无参布尔判定方法。
+- 对该判定方法做原生 detour，使其始终返回 `true`；同时把判定依赖的两个布尔字段
+  强制为“已认证”组合（`认证=true`、`需要验证=false`）。
+  - 即使调用方在 detour 安装前已经被 JIT 并内联了判定逻辑，直接写字段也能保证判定为真。
+  - 每秒重写一次，防止插件的网络刷新把状态改回去。
 - 每秒把凭证到期 `DateTime` 字段写成未来时间，避免刷新失败后回到
   `0001/1/1`。
 - 把状态字符串中的 `未激活` / `未连接` / `未授权` / `未验证` 改为对应的
-  激活状态。
-- 将授权状态的 getter/setter 替换为映射逻辑：即使插件内部仍然写入
-  `未激活`，界面和功能读取时也会得到 `已激活`。
+  激活状态；并把授权状态的 getter/setter 替换为映射逻辑。
 - 从 `UiBuilder.Draw` 移除验证窗口的无参绘制回调，并把窗口的 `IsOpen`
-  设为 `false`，使“猫猫验证”窗口不再出现。
+  设为 `false`。
+- 结果是：`/cct` 或插件列表中的齿轮按钮会**直接打开角色铭牌主窗口**，
+  不再弹出验证窗口；如果验证窗口曾经打开，下一帧也会被关闭并切换到主窗口。
 - **不再**替换接收 `Action` 的 `Show(Action)` 辅助方法。该方法不是实际绘制
   路径，调用它的回调正是首版出现 2 秒卡顿的原因。
 
@@ -62,18 +68,32 @@ DALAMUD_HOME=F:/DevEnv/dalamud dotnet build NekoUnlock.csproj -c Release
   - `[NekoUnlock] loaded`
   - `PvPAuto authorization state applied`
   - `CharaCradThief authorization status getter/setter patched`
+  - `CharaCradThief authorization gate patched`
   - `CharaCradThief authorization fields set and verification window suppressed`
-- PvPAuto：之前被授权状态阻止的模块应可以启用。
-- CharaCradThief：`/cct` 打开时不应再出现验证窗口。
+- PvPAuto：`/pvpauto` 打开主窗口，之前被授权状态阻止的模块应可以启用。
+- CharaCradThief：`/cct` 或插件列表中的齿轮按钮应直接打开角色铭牌主窗口，
+  不再出现验证窗口。
+
+## 使用方式
+
+- **CharaCradThief**：游戏内输入 `/cct`，或在 Dalamud 插件列表中点击该插件的
+  齿轮/设置按钮。授权判定补丁生效后，这会直接打开角色铭牌主窗口。
+- **PvPAuto**：游戏内输入 `/pvpauto` 打开主界面，然后在界面里勾选需要的模块；
+  NekoUnlock 只负责让授权状态通过，具体功能仍需在插件自己的界面中启用。
+- 如果打开时仍然看到验证窗口：
+  1. 确认 NekoUnlock 与目标插件都已启用；
+  2. 确认版本为 1.0.0.3 或更高；
+  3. 完全重启游戏（不是只重载插件）；
+  4. 在 `/xllog` 中搜索 `authorization gate patched`，确认补丁已生效。
 
 ## 常见问题
 
 - 如果安装前 PvPAuto 的模块已经被验证失败禁用，安装后在界面中手动启用一次；
   NekoUnlock 会阻止授权丢失处理器再次禁用它们。
 - 如果 CharaCradThief 仍然显示验证窗口，检查 `/xllog` 中是否有
-  `CharaCradThief authorization fields set and verification window suppressed`。
-  如果窗口仍然出现，说明验证管理器在最后一次轮询之后重新注册了绘制回调；
-  保持插件启用并继续观察日志。
+  `CharaCradThief authorization gate patched`。如果没有，说明没有定位到认证客户端
+  或判定方法，通常是目标插件版本与上面列出的版本不一致；请把 `/xllog` 和插件版本
+  发回来更新反射目标。
 - 如果目标插件更新，混淆后的类型名/方法名可能变化，需要更新 `Plugin.cs`
   中的反射目标。
 

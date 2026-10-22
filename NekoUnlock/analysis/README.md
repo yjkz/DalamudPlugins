@@ -72,12 +72,46 @@ void Show(Action callback)
 了接收 `Action` 的方法，所以窗口仍然出现；轮询并调用它的回调还造成了
 约 2 秒的卡顿。
 
-正确的做法是操作验证管理器的静态状态：
+### 3.1 打开主窗口的判定链
+
+插件入口（`IDalamudPlugin`）在构造时：
+
+1. 调用验证管理器的 `Initialize(pluginInterface, name, id)`；
+2. 注册 `UiBuilder.Draw`、`UiBuilder.OpenConfigUi` 和 `/cct` 命令处理器；
+3. 其中 `/cct` 命令和 `OpenConfigUi` 走同一个方法：
+
+```csharp
+if (authClient.Gate()) {          // 无参 bool 判定
+    VerifyWindow.IsOpen = false;
+    MainWindow.IsOpen = true;
+} else {
+    VerifyWindow.IsOpen = true;
+    MainWindow.IsOpen = false;
+}
+```
+
+`authClient` 是验证管理器持有的认证客户端，内部有 5 个 bool 字段/属性。
+插件使用的判定方法逻辑为：
+
+```csharp
+bool Gate() => fieldA && !fieldC;   // 构造时 A=false, C=true
+```
+
+`UiBuilder.Draw` 处理器也会检查同一个判定：如果判定为真且验证窗口是打开的，
+就关闭验证窗口并打开主窗口。因此只改字符串或日期字段不够——字符串只影响
+验证窗口里的显示文本，判定仍然为假时，`/cct` 依旧会打开验证窗口。
+
+正确的做法是操作验证管理器的静态状态，并补上判定链：
 
 - 4 个 `DateTime` 字段中，`Draw` 使用其中 3 个和 `DateTime.Now` 比较；
   把它们设为未来时间即可通过到期检查。
 - 5 个字符串字段中，短的中文状态串包含 `未激活` / `未连接` 等；
   将它们映射为 `已激活` / `已连接`。
+- 找到认证客户端中插件调用的无参 bool 判定方法，以及它递归读取的两个
+  bool 字段；把字段强制为 `A=true`、`C=false`。
+- 对判定方法做原生 detour，使其恒返回 `true`。只写字段也能绕过，但调用方
+  可能在补丁安装前已把判定内联进 `Draw`/`OpenConfigUi`；字段和 detour 同时
+  使用可以覆盖这两种情况。
 - 从 `UiBuilder.Draw` 移除 `VerifyWindow` 的无参绘制回调，并设置
   `IsOpen = false`，窗口不再绘制。
 
@@ -100,6 +134,11 @@ void Show(Action callback)
   - 把状态字符串中的 `未激活` / `未连接` / `未授权` / `未验证` 改为激活态；
   - 将授权状态的 getter/setter 替换为映射逻辑，保证插件内部写入 `未激活`
     后，界面和功能读取到的仍是 `已激活`；
+  - 扫描插件入口的 IL，定位它对认证客户端调用的无参 bool 判定方法；
+    再扫描判定方法及其调用链，收集它读取的 bool 字段；
+  - 用一个已知初始状态（全 `false`）逐个置位，找出使判定为真的字段（A），
+    其余判定字段置 `false`（C），每秒重写，防止网络刷新覆盖；
+  - 对判定方法做原生 detour 返回 `true`；
   - 从 `UiBuilder.Draw` 移除验证窗口的无参绘制回调，并设置 `IsOpen = false`；
   - 不再替换接收 `Action` 的辅助方法，也不再轮询它的静态回调。
 

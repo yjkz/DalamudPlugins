@@ -354,9 +354,16 @@ internal sealed class CctUnlock : IDisposable
     private readonly FieldInfo[] _stringFields;
     private readonly PropertyInfo? _statusProperty;
     private readonly FieldInfo? _statusField;
+    private readonly FieldInfo? _clientField;
+    private readonly MethodInfo? _gateMethod;
+    private readonly FieldInfo[] _gateFields;
     private DateTime _nextApply = DateTime.MinValue;
     private bool _logged;
     private bool _statusPatched;
+    private bool _fieldsResolved;
+    private bool _gatePatched;
+    private FieldInfo? _positiveField;
+    private object? _client;
 
     private CctUnlock(
         IPluginLog log,
@@ -366,7 +373,10 @@ internal sealed class CctUnlock : IDisposable
         FieldInfo[] dateFields,
         FieldInfo[] stringFields,
         PropertyInfo? statusProperty,
-        FieldInfo? statusField)
+        FieldInfo? statusField,
+        FieldInfo? clientField,
+        MethodInfo? gateMethod,
+        FieldInfo[] gateFields)
     {
         _log = log;
         _pluginInterface = pluginInterface;
@@ -376,6 +386,9 @@ internal sealed class CctUnlock : IDisposable
         _stringFields = stringFields;
         _statusProperty = statusProperty;
         _statusField = statusField;
+        _clientField = clientField;
+        _gateMethod = gateMethod;
+        _gateFields = gateFields;
     }
 
     public static CctUnlock? TryCreate(Assembly? assembly, IPluginLog log, IDalamudPluginInterface pluginInterface)
@@ -434,6 +447,29 @@ internal sealed class CctUnlock : IDisposable
               (statusProperty.GetMethod is not null ? FindStaticStringField(statusProperty.GetMethod, verifierType) : null)
             : null;
 
+        // The plugin entry (IDalamudPlugin) calls the verifier's auth client
+        // before deciding between the main window and the verification window.
+        // Locate that client, its gate method, and the boolean fields the gate
+        // reads. Forcing those fields makes the gate true even when the caller
+        // was JIT-compiled before the native detour was installed.
+        var pluginType = assembly.GetTypes()
+            .FirstOrDefault(type => typeof(IDalamudPlugin).IsAssignableFrom(type));
+        var clientField = pluginType is null
+            ? null
+            : verifierType.GetFields(StaticFlags)
+                .FirstOrDefault(field =>
+                    !field.FieldType.IsPrimitive &&
+                    field.FieldType != typeof(string) &&
+                    field.FieldType != typeof(DateTime) &&
+                    field.FieldType != windowType &&
+                    field.FieldType.Assembly == assembly);
+        var gateMethod = pluginType is not null && clientField is not null
+            ? FindAuthorizationGate(pluginType, clientField.FieldType)
+            : null;
+        var gateFields = clientField is not null && gateMethod is not null
+            ? CollectGateFields(clientField.FieldType, gateMethod)
+            : Array.Empty<FieldInfo>();
+
         return new CctUnlock(
             log,
             pluginInterface,
@@ -442,7 +478,136 @@ internal sealed class CctUnlock : IDisposable
             dateFields,
             stringFields,
             statusProperty,
-            statusField);
+            statusField,
+            clientField,
+            gateMethod,
+            gateFields);
+    }
+
+    private static MethodInfo? FindAuthorizationGate(Type pluginType, Type clientType)
+    {
+        var counts = new Dictionary<MethodInfo, int>();
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic |
+                                   BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
+        var methods = pluginType.GetMethods(flags).Cast<MethodBase>()
+            .Concat(pluginType.GetConstructors(flags))
+            .Concat(new[] { pluginType.TypeInitializer }.OfType<MethodBase>());
+
+        foreach (var method in methods)
+        {
+            foreach (var called in EnumerateCalledMethods(method))
+            {
+                if (called.DeclaringType != clientType ||
+                    called.ReturnType != typeof(bool) ||
+                    called.GetParameters().Length != 0)
+                    continue;
+
+                counts[called] = counts.TryGetValue(called, out var count) ? count + 1 : 1;
+            }
+        }
+
+        return counts.OrderByDescending(pair => pair.Value)
+            .Select(pair => pair.Key)
+            .FirstOrDefault();
+    }
+
+    private static FieldInfo[] CollectGateFields(Type clientType, MethodInfo gateMethod)
+    {
+        var fields = new HashSet<FieldInfo>();
+        var visited = new HashSet<MethodInfo>();
+        var queue = new Queue<MethodInfo>();
+        queue.Enqueue(gateMethod);
+
+        while (queue.Count > 0 && visited.Count < 32)
+        {
+            var method = queue.Dequeue();
+            if (!visited.Add(method))
+                continue;
+
+            foreach (var called in EnumerateCalledMethods(method))
+            {
+                if (called.DeclaringType == clientType &&
+                    called.ReturnType == typeof(bool) &&
+                    called.GetParameters().Length == 0)
+                    queue.Enqueue(called);
+            }
+
+            try
+            {
+                RuntimeHelpers.PrepareMethod(method.MethodHandle);
+                var il = method.GetMethodBody()?.GetILAsByteArray();
+                if (il is null)
+                    continue;
+
+                for (var index = 0; index + 4 < il.Length; index++)
+                {
+                    // ldfld 0x7B, ldsfld 0x7E
+                    if (il[index] != 0x7B && il[index] != 0x7E)
+                        continue;
+
+                    var token = BitConverter.ToInt32(il, index + 1);
+                    try
+                    {
+                        var field = method.Module.ResolveField(token);
+                        if (field is not null &&
+                            field.DeclaringType == clientType &&
+                            field.FieldType == typeof(bool))
+                            fields.Add(field);
+                    }
+                    catch
+                    {
+                        // Token can refer to another module.
+                    }
+                }
+            }
+            catch
+            {
+                // Encrypted body or unsupported metadata.
+            }
+        }
+
+        return fields.ToArray();
+    }
+
+    private static IEnumerable<MethodInfo> EnumerateCalledMethods(MethodBase method)
+    {
+        byte[]? il;
+        try
+        {
+            RuntimeHelpers.PrepareMethod(method.MethodHandle);
+            il = method.GetMethodBody()?.GetILAsByteArray();
+        }
+        catch
+        {
+            yield break;
+        }
+
+        if (il is null)
+            yield break;
+
+        for (var index = 0; index + 4 < il.Length; index++)
+        {
+            // call 0x28, callvirt 0x6F
+            if (il[index] != 0x28 && il[index] != 0x6F)
+                continue;
+
+            var token = BitConverter.ToInt32(il, index + 1);
+            MethodInfo? called = null;
+            try
+            {
+                called = method.Module.ResolveMethod(
+                    token,
+                    method.DeclaringType?.GetGenericArguments(),
+                    method.IsGenericMethod ? method.GetGenericArguments() : null) as MethodInfo;
+            }
+            catch
+            {
+                // Token can refer to another module.
+            }
+
+            if (called is not null)
+                yield return called;
+        }
     }
 
     private static FieldInfo? FindStaticStringField(MethodInfo method, Type declaringType)
@@ -495,6 +660,29 @@ internal sealed class CctUnlock : IDisposable
         {
             try { field.SetValue(null, expires); }
             catch { /* readonly or type mismatch on a future build */ }
+        }
+
+        if (_clientField is not null && _gateMethod is not null)
+        {
+            _client ??= _clientField.GetValue(null);
+            if (_client is not null)
+            {
+                if (!_gatePatched)
+                {
+                    ForceAuthorizationFields(_client);
+                    _gatePatched = NativeDetour.Patch(
+                        _gateMethod,
+                        typeof(CctPatches).GetMethod(nameof(CctPatches.AlwaysTrue))!);
+                    if (_gatePatched)
+                        _log.Information("[NekoUnlock] CharaCradThief authorization gate patched");
+                }
+                else
+                {
+                    // The verifier may reset these fields after its own network
+                    // check; keep the gate's inputs valid on every tick.
+                    ForceAuthorizationFields(_client);
+                }
+            }
         }
 
         if (!_statusPatched &&
@@ -563,6 +751,58 @@ internal sealed class CctUnlock : IDisposable
         }
     }
 
+    private void ForceAuthorizationFields(object client)
+    {
+        if (_gateFields.Length == 0)
+            return;
+
+        if (!_fieldsResolved)
+        {
+            try
+            {
+                foreach (var field in _gateFields)
+                    field.SetValue(client, false);
+
+                var baseline = InvokeGate(client);
+                foreach (var field in _gateFields)
+                {
+                    field.SetValue(client, true);
+                    var result = InvokeGate(client);
+                    field.SetValue(client, false);
+                    if (!baseline && result)
+                    {
+                        _positiveField = field;
+                        break;
+                    }
+                }
+            }
+            catch
+            {
+                // Keep the raw fields untouched if the verifier layout changes.
+            }
+
+            _fieldsResolved = true;
+        }
+
+        foreach (var field in _gateFields)
+        {
+            try { field.SetValue(client, field == _positiveField); }
+            catch { /* readonly or type mismatch on a future build */ }
+        }
+    }
+
+    private bool InvokeGate(object client)
+    {
+        try
+        {
+            return _gateMethod is not null && _gateMethod.Invoke(client, null) is true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public void Dispose()
     {
     }
@@ -574,6 +814,11 @@ internal static class CctPatches
 
     public static void NoOpInstance(object self)
     {
+    }
+
+    public static bool AlwaysTrue()
+    {
+        return true;
     }
 
     public static string GetStatus()
