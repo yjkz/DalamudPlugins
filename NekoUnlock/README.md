@@ -61,6 +61,9 @@ DALAMUD_HOME=F:/DevEnv/dalamud dotnet build NekoUnlock.csproj -c Release
 4. 重启游戏（或重新加载插件）。
 
 如果使用自定义仓库，也可以直接安装打包好的 `dist/NekoUnlock.zip`。
+仓库使用的 zip 必须把 `NekoUnlock.dll`、`NekoUnlock.json`、
+`NekoUnlock.deps.json` 放在压缩包根目录；不能再套一层 `NekoUnlock/`，
+否则 Dalamud 解压后会报 `Could not find file ...\NekoUnlock.json`。
 
 ## 游戏内验证
 
