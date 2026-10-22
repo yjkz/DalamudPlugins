@@ -16,6 +16,7 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime _nextPvP = DateTime.MinValue;
     private DateTime _nextCct = DateTime.MinValue;
     private readonly List<PvPAutoState> _pvP = new();
+    private readonly HashSet<string> _networkPatched = new();
     private CctUnlock? _cct;
 
     public Plugin(IFramework framework, IPluginLog log, IDalamudPluginInterface pluginInterface)
@@ -25,6 +26,14 @@ public sealed class Plugin : IDalamudPlugin
         _pluginInterface = pluginInterface;
         _framework.Update += OnUpdate;
         AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoad;
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            if (string.Equals(assembly.GetName().Name, "CharaCradThief", StringComparison.OrdinalIgnoreCase))
+            {
+                try { PatchCctNetwork(assembly); }
+                catch { /* plugin is still loading */ }
+            }
+        }
         _log.Information("[NekoUnlock] loaded");
     }
 
@@ -103,9 +112,71 @@ public sealed class Plugin : IDalamudPlugin
     {
         lock (_gate)
         {
-            if (_cct is null && assembly is not null)
-                _cct = CctUnlock.TryCreate(assembly, _log, _pluginInterface);
+            if (assembly is not null)
+            {
+                PatchCctNetwork(assembly);
+                if (_cct is null)
+                    _cct = CctUnlock.TryCreate(assembly, _log, _pluginInterface);
+            }
+
             _cct?.Apply();
+        }
+    }
+
+    private void PatchCctNetwork(Assembly assembly)
+    {
+        var key = assembly.FullName ?? assembly.GetName().Name ?? string.Empty;
+        lock (_networkPatched)
+        {
+            if (_networkPatched.Contains(key))
+                return;
+        }
+
+        if (TryPatchCctNetwork(assembly, _log))
+        {
+            lock (_networkPatched)
+                _networkPatched.Add(key);
+            _log.Information("[NekoUnlock] CharaCradThief auth network call suppressed");
+        }
+    }
+
+    internal static bool TryPatchCctNetwork(Assembly assembly, IPluginLog log)
+    {
+        try
+        {
+            var windowType = assembly.GetType("NekoVerifierLib.VerifyWindow");
+            if (windowType is null)
+                return false;
+
+            var verifierType = assembly.GetTypes().FirstOrDefault(type =>
+            {
+                var fields = type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                return fields.Count(field => field.FieldType == typeof(DateTime)) >= 3 &&
+                       fields.Any(field => field.FieldType == windowType);
+            });
+            var clientField = verifierType?.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                .FirstOrDefault(field =>
+                    !field.FieldType.IsPrimitive &&
+                    field.FieldType != typeof(string) &&
+                    field.FieldType != typeof(DateTime) &&
+                    field.FieldType != windowType &&
+                    field.FieldType.Assembly == assembly);
+            var query = clientField?.FieldType
+                .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                .FirstOrDefault(method =>
+                    method.GetParameters().Length == 0 &&
+                    method.ReturnType == typeof(Task<bool>));
+            if (query is null)
+                return false;
+
+            return NativeDetour.Patch(
+                query,
+                typeof(CctPatches).GetMethod(nameof(CctPatches.ReturnFalseTask))!);
+        }
+        catch (Exception ex)
+        {
+            log.Warning($"[NekoUnlock] CharaCradThief auth network patch failed: {ex.GetType().Name}: {ex.Message}");
+            return false;
         }
     }
 
@@ -821,6 +892,13 @@ internal static class CctPatches
         return true;
     }
 
+    public static readonly Task<bool> FalseTask = Task.FromResult(false);
+
+    public static Task<bool> ReturnFalseTask()
+    {
+        return FalseTask;
+    }
+
     public static string GetStatus()
     {
         return MapStatus(StatusField?.GetValue(null) as string);
@@ -855,15 +933,47 @@ internal static class NativeDetour
     {
         try
         {
+            RuntimeHelpers.PrepareMethod(target.MethodHandle);
             RuntimeHelpers.PrepareMethod(replacement.MethodHandle);
-            var entry = target.MethodHandle.GetFunctionPointer();
-            var destination = replacement.MethodHandle.GetFunctionPointer();
+            var entry = ResolveCodePointer(target.MethodHandle.GetFunctionPointer());
+            var destination = ResolveCodePointer(replacement.MethodHandle.GetFunctionPointer());
             return WriteJump(entry, destination);
         }
         catch
         {
             return false;
         }
+    }
+
+    private static IntPtr ResolveCodePointer(IntPtr entry)
+    {
+        try
+        {
+            // x64 stable-entry precode: FF 25 disp32 -> jmp qword ptr [rip+disp32]
+            if (Marshal.ReadByte(entry, 0) == 0xFF && Marshal.ReadByte(entry, 1) == 0x25)
+            {
+                var displacement = Marshal.ReadInt32(entry, 2);
+                var slot = entry + 6 + displacement;
+                var code = Marshal.ReadIntPtr(slot);
+                if (code != IntPtr.Zero && code != entry)
+                    return code;
+            }
+
+            // E9 rel32 -> jmp target
+            if (Marshal.ReadByte(entry, 0) == 0xE9)
+            {
+                var relative = Marshal.ReadInt32(entry, 1);
+                var code = entry + 5 + relative;
+                if (code != IntPtr.Zero)
+                    return code;
+            }
+        }
+        catch
+        {
+            // Fall back to the entry point.
+        }
+
+        return entry;
     }
 
     private static bool WriteJump(IntPtr target, IntPtr destination)
@@ -873,9 +983,6 @@ internal static class NativeDetour
 
         lock (Patched)
         {
-            if (Patched.Contains(target))
-                return true;
-
             var patch = new byte[12];
             patch[0] = 0x48; // mov rax, imm64
             patch[1] = 0xB8;
@@ -886,8 +993,12 @@ internal static class NativeDetour
             if (!VirtualProtect(target, (UIntPtr)patch.Length, PageExecuteReadWrite, out var oldProtect))
                 return false;
 
-            var original = new byte[patch.Length];
-            Marshal.Copy(target, original, 0, original.Length);
+            if (!Originals.ContainsKey(target))
+            {
+                var original = new byte[patch.Length];
+                Marshal.Copy(target, original, 0, original.Length);
+                Originals[target] = original;
+            }
 
             try
             {
@@ -899,7 +1010,6 @@ internal static class NativeDetour
             }
 
             FlushInstructionCache(GetCurrentProcess(), target, (UIntPtr)patch.Length);
-            Originals[target] = original;
             Patched.Add(target);
             return true;
         }

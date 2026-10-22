@@ -90,6 +90,18 @@ if (authClient.Gate()) {          // 无参 bool 判定
 }
 ```
 
+认证客户端的构造函数里还有一次**同步 HTTP 查询**：
+
+```csharp
+// AuthClient..ctor()
+SetTestCodeState(QueryLicense().GetAwaiter().GetResult());
+```
+
+验证服务器不可达时，`QueryLicense()` 会抛 `HttpRequestException`，异常穿出
+构造函数，导致 CharaCradThief 整个插件加载失败。NekoUnlock 在程序集加载时
+就把该无参 `Task<bool>` 查询方法替换为返回 `Task.FromResult(false)`，让客户端
+构造函数正常完成；授权判定随后由字段强制和 gate detour 接管。
+
 `authClient` 是验证管理器持有的认证客户端，内部有 5 个 bool 字段/属性。
 插件使用的判定方法逻辑为：
 
@@ -115,6 +127,20 @@ bool Gate() => fieldA && !fieldC;   // 构造时 A=false, C=true
 - 从 `UiBuilder.Draw` 移除 `VerifyWindow` 的无参绘制回调，并设置
   `IsOpen = false`，窗口不再绘制。
 
+### 3.2 .NET 10 原生 detour 的入口问题
+
+`MethodHandle.GetFunctionPointer()` 返回的是 **stable-entry precode 桩**：
+
+```text
+FF 25 disp32    jmp qword ptr [rip+disp32]
+```
+
+直接改写这 12 字节并不能可靠替换方法：precode 会被运行时重新初始化，
+JIT 后的调用也可能绕过被改写的桩。正确做法是解析 `FF 25` 跳到
+`[rip+disp32]` 指向的真正 JIT 代码入口，再在该入口写入
+`mov rax, imm64; jmp rax`。`NativeDetour.ResolveCodePointer` 就在做这件事；
+如果遇到 `E9 rel32` 也按相对跳转解析。
+
 `decrypted/verifywindow-action.il.txt` 仍保留该辅助方法的 IL，
 用于说明为什么它不是正确的补丁点。
 
@@ -130,6 +156,8 @@ bool Gate() => fieldA && !fieldC;   // 构造时 A=false, C=true
     `DisableAllForTestCodeLoss` 替换为空操作；
   - 模块管理器实例可用时调用一次 `ApplyConfig()`。
 - CharaCradThief：
+  - 在程序集加载时把认证客户端的无参 `Task<bool>` 启动查询替换为
+    `Task.FromResult(false)`，避免验证服务器不可达时构造函数抛异常；
   - 每秒写入验证管理器的 4 个静态 `DateTime` 字段（未来 10 年）；
   - 把状态字符串中的 `未激活` / `未连接` / `未授权` / `未验证` 改为激活态；
   - 将授权状态的 getter/setter 替换为映射逻辑，保证插件内部写入 `未激活`
@@ -139,6 +167,7 @@ bool Gate() => fieldA && !fieldC;   // 构造时 A=false, C=true
   - 用一个已知初始状态（全 `false`）逐个置位，找出使判定为真的字段（A），
     其余判定字段置 `false`（C），每秒重写，防止网络刷新覆盖；
   - 对判定方法做原生 detour 返回 `true`；
+  - 原生 detour 解析 stable-entry precode，改写真正的 JIT 代码入口；
   - 从 `UiBuilder.Draw` 移除验证窗口的无参绘制回调，并设置 `IsOpen = false`；
   - 不再替换接收 `Action` 的辅助方法，也不再轮询它的静态回调。
 

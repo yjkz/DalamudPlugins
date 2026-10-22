@@ -27,10 +27,15 @@ NekoVerifier 的服务器验证流程。
 ### CharaCradThief
 
 - 找到静态验证管理器（包含验证窗口、5 个状态/凭证字符串和 4 个 `DateTime` 字段）。
+- **在插件构造函数之前**拦截认证客户端启动时的同步 HTTP 查询，直接返回
+  `Task.FromResult(false)`。否则验证服务器不可达时，客户端构造函数会抛
+  `HttpRequestException`，导致整个 CharaCradThief 插件加载失败。
 - 找到插件入口使用的“认证客户端”（静态字段），以及它用来决定“打开主窗口还是验证窗口”的
   无参布尔判定方法。
 - 对该判定方法做原生 detour，使其始终返回 `true`；同时把判定依赖的两个布尔字段
   强制为“已认证”组合（`认证=true`、`需要验证=false`）。
+  - 原生 detour 会先解析 .NET 的 stable-entry precode，改写真正的 JIT 代码入口，
+    而不是只改 precode 桩。
   - 即使调用方在 detour 安装前已经被 JIT 并内联了判定逻辑，直接写字段也能保证判定为真。
   - 每秒重写一次，防止插件的网络刷新把状态改回去。
 - 每秒把凭证到期 `DateTime` 字段写成未来时间，避免刷新失败后回到
@@ -70,6 +75,7 @@ DALAMUD_HOME=F:/DevEnv/dalamud dotnet build NekoUnlock.csproj -c Release
 - `/xllog` 中应出现：
   - `[NekoUnlock] loaded`
   - `PvPAuto authorization state applied`
+  - `CharaCradThief auth network call suppressed`
   - `CharaCradThief authorization status getter/setter patched`
   - `CharaCradThief authorization gate patched`
   - `CharaCradThief authorization fields set and verification window suppressed`
@@ -85,7 +91,7 @@ DALAMUD_HOME=F:/DevEnv/dalamud dotnet build NekoUnlock.csproj -c Release
   NekoUnlock 只负责让授权状态通过，具体功能仍需在插件自己的界面中启用。
 - 如果打开时仍然看到验证窗口：
   1. 确认 NekoUnlock 与目标插件都已启用；
-  2. 确认版本为 1.0.0.3 或更高；
+  2. 确认版本为 1.0.0.4 或更高；
   3. 完全重启游戏（不是只重载插件）；
   4. 在 `/xllog` 中搜索 `authorization gate patched`，确认补丁已生效。
 
